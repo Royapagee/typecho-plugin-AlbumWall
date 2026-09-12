@@ -205,6 +205,39 @@ $awJs = View::asset('static/album.js');
                                 <span aria-hidden="true">&times;</span>
                             </button>
                         </div>
+
+                        <?php // ── 浮层：单张照片 ────────────────────────────────────
+                              // 和上面那几个一样是 position: fixed 的，由 JS 挪到 <body> 下。
+                              // 它是更上面的一层（z-index 更高），关相册时一并收走。
+                              //
+                              // 白框和舞台的宽高由 JS 写成行内样式：框要"裱住这一张"，
+                              // 四边白边得一样宽，边长就必须跟着照片的比例走——而这个
+                              // 比例只有图下载完才知道，CSS 这层拿不到。见 album.js 的 fitRect()。 ?>
+                        <div class="aw-viewer"
+                             hidden
+                             role="dialog"
+                             aria-modal="true"
+                             aria-label="<?php echo View::escape(_t('照片')); ?>"
+                             data-aw-label="<?php echo View::escape(_t('查看大图：第 %1$d 张，共 %2$d 张')); ?>">
+                            <div class="aw-viewer__backdrop"></div>
+
+                            <?php // 装裱的白框。tabindex="-1" 是为了落位后能把焦点收过来，
+                                  // 键盘用户不至于还停在身后那面墙上 ?>
+                            <div class="aw-viewer__frame" tabindex="-1">
+                                <?php // 框内。照片在这里被裁切边，放缩和平移只作用在这一层里面，
+                                      // 框本身一动不动——"在框内放缩"就是这一条 ?>
+                                <div class="aw-viewer__stage">
+                                    <img class="aw-viewer__img" alt="" decoding="async" draggable="false">
+                                </div>
+                            </div>
+
+                            <?php // 飞行外壳。盒子就是终点那块舞台，起点靠 scale 缩回缩略图——
+                                  // 这样飞行途中是按大图渲染再缩小的，比反过来放大要清楚，
+                                  // 和文字替身（.aw-shell__title）是同一个道理 ?>
+                            <div class="aw-viewer__fly" hidden aria-hidden="true">
+                                <img alt="" decoding="async" draggable="false">
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

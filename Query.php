@@ -14,13 +14,12 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
 /**
  * 相册数据的取数层：按标签把文章查出来，给每篇算好封面和图片列表。
  *
- * 只用 Typecho 自带的四张表（contents / relationships / metas / fields），不建表、
- * 不写库——相册是对既有文章的一种视图，没有自己的数据。
+ * 标签是可多选的，命中任意一个标签的文章都会进来，同一篇文章只出现一次。
  *
- * 封面规则（与 Jasmine 主题的缩略图字段语义一致）：
- *  1. 自定义字段里存的是图片地址 → 用这张
- *  2. 字段是空的 / 是 '1' / 是 '0' / 是别的什么 → 提取正文第一张图
- *  3. 两者都没有 → 按配置跳过这篇，或者留一张占位卡片
+ * 只用 Typecho 自带的四张表（contents / relationships / metas），不建表、不写库
+ * ——相册是对既有文章的一种视图，没有自己的数据。
+ *
+ * 封面规则：取正文第一张图。正文里没有图 → 按配置跳过这篇，或者留一张占位卡片。
  */
 final class Query
 {
@@ -69,8 +68,8 @@ final class Query
     {
         $settings = Plugin::settings();
 
-        $slug = trim((string) $settings['tagSlug']);
-        if ($slug === '') {
+        $slugs = (array) $settings['tagSlugs'];
+        if ($slugs === []) {
             return [];
         }
 
@@ -87,7 +86,7 @@ final class Query
             ->join('table.relationships', 'table.contents.cid = table.relationships.cid')
             ->join('table.metas', 'table.metas.mid = table.relationships.mid')
             ->where('table.metas.type = ?', 'tag')
-            ->where('table.metas.slug = ?', $slug)
+            ->where('table.metas.slug IN ?', $slugs)
             ->where('table.contents.type = ?', 'post')
             // 没有 status 这道坎的话，文章的 revision 会一起冒出来，相册里
             // 就会出现两个标题、日期、图片数完全一样的条目
@@ -96,7 +95,11 @@ final class Query
             ->where('table.contents.created < ?', $now)
             // 加密文章的图片不该漏进相册。password 的默认值是 NULL 而不是空串，
             // 只写 = '' 会把绝大多数正常文章一起滤掉
-            ->where('table.contents.password IS NULL OR table.contents.password = ?', '');
+            ->where('table.contents.password IS NULL OR table.contents.password = ?', '')
+            // 一篇同时挂着「摄影」和「旅游」的文章会被 JOIN 带出两行，相册里就是
+            // 两张一模一样的卡片。metas 是多选后才真正会重复的，单选时命中一行而已。
+            // 这是 Typecho 自己在分类多选里用的写法（Widget\Archive 的 mid IN 那段）
+            ->group('table.contents.cid');
 
         self::applyOrder($select, (string) $settings['orderBy']);
 
@@ -106,16 +109,13 @@ final class Query
             return [];
         }
 
-        $cids = array_map(static fn($row): int => (int) $row['cid'], $rows);
-        $thumbs = self::thumbMap($cids, (string) $settings['coverField']);
-
         $baseUrl = self::siteUrl();
         $hideEmpty = (string) $settings['hideEmpty'] === '1';
 
         $albums = [];
 
         foreach ($rows as $row) {
-            $album = self::build($row, $thumbs, $baseUrl);
+            $album = self::build($row, $baseUrl);
 
             // 一张图都没有的相册没有展示价值，默认跳过
             if ($album['cover'] === null && $hideEmpty) {
@@ -151,44 +151,12 @@ final class Query
     }
 
     /**
-     * 批量取自定义字段里存的值。
-     *
-     * @param array<int, int> $cids
-     * @return array<int, string> [cid => 字段值]
-     */
-    private static function thumbMap(array $cids, string $field): array
-    {
-        if ($cids === [] || $field === '') {
-            return [];
-        }
-
-        $db = Db::get();
-
-        $rows = $db->fetchAll(
-            $db->select('table.fields.cid', 'table.fields.str_value')
-                ->from('table.fields')
-                ->where('table.fields.name = ?', $field)
-                // 数组会被 Query::quoteValues() 展开成 ('1','2','3')
-                ->where('table.fields.cid IN ?', $cids)
-        );
-
-        $map = [];
-
-        foreach ($rows as $row) {
-            $map[(int) $row['cid']] = (string) $row['str_value'];
-        }
-
-        return $map;
-    }
-
-    /**
      * 把一行内容加工成相册结构。
      *
      * @param array<string, mixed> $row
-     * @param array<int, string> $thumbs
      * @return array<string, mixed>
      */
-    private static function build(array $row, array $thumbs, string $baseUrl): array
+    private static function build(array $row, string $baseUrl): array
     {
         $cid = (int) $row['cid'];
         $created = (int) $row['created'];
@@ -196,19 +164,9 @@ final class Query
 
         $images = Extract::images($text, $baseUrl);
 
-        // 字段里存的只可能是一张图片地址。'1'（Jasmine 的「从正文提取」）、
-        // '0'、空串，以及任何不是地址的残留值，一律回落到正文第一张。
-        $fromField = Extract::normalize((string) ($thumbs[$cid] ?? ''), $baseUrl);
-
-        if ($fromField !== null) {
-            $cover = $fromField;
-            // 封面取自字段，正文图片一张都不用让位
-            $photos = $images;
-        } else {
-            $cover = $images[0] ?? null;
-            // 封面就是正文第一张，正文里那张就不再重复列一遍
-            $photos = array_slice($images, 1);
-        }
+        // 封面就是正文第一张，正文里那张就不再重复列一遍
+        $cover = $images[0] ?? null;
+        $photos = array_slice($images, 1);
 
         return [
             'cid'       => $cid,
@@ -220,7 +178,6 @@ final class Query
             'date'      => self::date($created, 'Y-m-d'),
             'cover'     => $cover,
             'photos'    => $photos,
-            // 计数按正文里的图片总数算，和封面的来源无关
             'count'     => count($images),
         ];
     }
