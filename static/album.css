@@ -65,7 +65,7 @@
     --aw-sub-gap: .45em;
 
     /* 动效时长。JS 会读它来驱动 FLIP，改这里就够了。 */
-    --aw-dur: 620ms;
+    --aw-dur: 350ms;
     /* 落位时的交叉淡化时长。替身淡出、真身淡入同时走完这一段 */
     --aw-cross: 220ms;
     --aw-ease: cubic-bezier(.22, .9, .28, 1);
@@ -558,7 +558,21 @@
      * 它和网格卡片的封面比例一致，交接那一刻两边裁切完全相同，看不出接缝。
      */
     aspect-ratio: 3 / 2;
-    max-height: 55vh;
+
+    /*
+     * 宽度写死 100%，高度由比例推出来：封面永远和标题、照片墙、关闭按钮同宽。
+     *
+     * 这里**不要加 max-height**（曾经有 max-height: 55vh）。给一个写死
+     * aspect-ratio 的盒子配 max-height，浏览器会把这条约束 transfer 到 inline
+     * 轴上——transfer 只在 inline-size 是 auto 时发生——盒子于是被压成
+     * (55vh × 1.5) × 55vh，**宽度不再撑满内容区**。1520×771 的窗口里实测过：
+     * 940 宽的面板，封面只有 636 宽还缩在左边，右边空出两百多像素，关闭按钮
+     * 留在面板右上角，看着就是"首图被缩放、叉号错位"。
+     *
+     * 宽度写死之后，就算以后有人再加回 max-height，也只会从高度上裁（比例被
+     * 破坏、外壳落位时会跳一下），不会再动宽度——但正确做法是别加。
+     */
+    width: 100%;
 }
 
 .aw-detail.is-settled .aw-detail__cover {
@@ -577,14 +591,54 @@
 }
 
 /* ── 详情里的照片墙 ──────────────────────────────────────── */
+/*
+ * 瀑布流，但**不用 CSS 多列布局**。
+ *
+ * columns + column-fill: balance 的排法是"每列填到某个高度就换下一列"，而照片
+ * 不能从中间断开，于是除不尽的时候最后一列会整列空掉。实测（面板 870 宽、
+ * 4 列）：5 张 = 2/2/1/0，6 张 = 2/2/2/0，9 张 = 3/3/3/0——最右一列一张都没有，
+ * 看上去就是第一行右边缺了一张。注意这跟"最后一行不满"不是一回事：空的是
+ * **整列**，从第一行就开始空，所以特别扎眼。
+ *
+ * 除了空列，多列布局还有个副作用：图片是懒加载的，每加载几张就重新平衡一次，
+ * 照片会在列之间跳来跳去。
+ *
+ * 所以列由 JS 来分（见 album.js 的 layoutWall()）：按 i % 列数轮流塞，
+ * 空列不可能出现，列归属一旦定下就不再变。这里只负责把列摆好。
+ */
 .aw-photos {
-    columns: 4 170px;
-    column-gap: .6rem;
+    display: flex;
+    align-items: flex-start;
+    gap: .6rem;
 }
 
+.aw-col {
+    /* flex: 1 1 0 让各列等宽；min-width: 0 是兜底——flex 项目的 min-width 默认
+       是 auto，遇到撑不下的内容会把列顶宽，几列就不再等宽了 */
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+}
+
+/*
+ * 一张照片。是 <button> 不是 <figure>——它现在的职责是"点开这一张"，
+ * 用按钮才有 Tab 焦点和回车/空格触发，和网格里的卡片是同一套做法。
+ */
 .aw-photo {
-    margin: 0 0 .6rem;
-    break-inside: avoid;
+    /* 间距由 .aw-col 的 gap 管，这里不再自带外边距 */
+    margin: 0;
+    /* button 的默认外观全部清掉 */
+    -webkit-appearance: none;
+    appearance: none;
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    font: inherit;
+    cursor: zoom-in;
+
     border-radius: var(--aw-radius-sm);
     overflow: hidden;
     background: color-mix(in srgb, var(--aw-text) 8%, transparent);
@@ -601,6 +655,16 @@
 .aw-detail.is-settled .aw-photo {
     opacity: 1;
     transform: none;
+}
+
+.aw-photo:focus-visible {
+    outline: 2px solid var(--aw-accent);
+    outline-offset: 2px;
+}
+
+/* 这一张飞到大图去了，原地留白。墙不塌，回程才有落点 */
+.aw-photo.is-flying {
+    visibility: hidden;
 }
 
 .aw-photo img {
@@ -704,6 +768,200 @@
     transition:
         opacity 180ms linear,
         transform 180ms var(--aw-ease);
+}
+
+/* ── 浮层：单张照片详情 ──────────────────────────────────── */
+/*
+ * 相册详情的上面还有一层：把墙上某一张取下来，裱进白框里看。
+ *
+ * 它是独立的一层浮层，不是相册面板的一部分——面板在滚动区里，跟着相册滚走的
+ * 东西当不了"看大图"的容器；而且它要盖住面板右上角那个关闭按钮。
+ *
+ * 两层浮层的关系：相册那层是"墙"，这层是"从墙上取下来的一张"。所以关相册时
+ * 这层要被一并收走（见 album.js 的 hidePhotoNow），不留孤儿。
+ */
+.aw-viewer {
+    position: fixed;
+    inset: 0;
+    z-index: 9995;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* hidden 属性自带的 display: none 会被上面那条 display: flex 盖掉，得补回来 */
+.aw-viewer[hidden] {
+    display: none;
+}
+
+/*
+ * 压暗层。取的是**固定**的深色，不跟主题走（相册那层用的是 --aw-scrim，在
+ * Jasmine 浅色下是一层浅粉）。理由是照片在深底上最好看，而且"进暗房看片"这个
+ * 观感得靠它——跟着主题翻成浅色，白框就浮不出来了。
+ */
+.aw-viewer__backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(14, 10, 12, .92);
+    opacity: 0;
+    transition: opacity 240ms var(--aw-ease);
+}
+
+.aw-viewer.is-on .aw-viewer__backdrop {
+    opacity: 1;
+}
+
+/*
+ * 装裱的白框。
+ *
+ * 白边用 padding，宽度由 JS 写进 --aw-mat；框的宽高也是 JS 算好写成行内样式的
+ * （要跟着照片的比例走，CSS 这边拿不到那个比例）。box-sizing 显式写死，免得
+ * 落在没有 Bootstrap 的主题里时算成 content-box，白边一宽就撑破尺寸。
+ *
+ * 白色不跟主题翻：装裱用的白卡纸本来就是白的，深色模式下这块白反而正是
+ * "照片被裱起来"的那一下。
+ */
+.aw-viewer__frame {
+    position: relative;
+    box-sizing: border-box;
+    padding: var(--aw-mat, 14px);
+    background: #fff;
+    /* 圆角和网格里的卡片同一个（--aw-radius）。框、框里那张照片、以及飞在半路的
+       外壳三处必须用同一个值：外壳落了位要无缝交回给真身，差一点就是"啪"地一下 */
+    border-radius: var(--aw-radius);
+    /* 白框落在压暗的背景上，光靠白边看不出厚度，得给一层投影 */
+    box-shadow: 0 26px 80px rgba(0, 0, 0, .5);
+    opacity: 0;
+    transition: opacity 240ms var(--aw-ease);
+
+    /* 框里的手势全部由脚本接管：不选中、不让浏览器自己滚或缩放。
+       "不拖图片"不靠 CSS——两个 <img> 上写的都是 draggable="false"，
+       那条才是各浏览器都认的做法 */
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.aw-viewer.is-on .aw-viewer__frame {
+    opacity: 1;
+}
+
+/*
+ * 白框不画焦点环。
+ *
+ * 它的 tabindex="-1" 只为落位时把焦点收过来（读屏要有个落点、Esc 要有个
+ * 作用对象），框本身不是可操作控件，没有"聚焦了能干什么"可言。
+ *
+ * 画出来还很难看：焦点环只在"没有前置交互"时出现（直接用 #album-47-p3
+ * 这种地址进来就是这样），一进页面白框上先套一圈蓝边，像渲染坏了。
+ */
+.aw-viewer__frame:focus {
+    outline: 0;
+}
+
+/*
+ * 框内。照片在这里被裁切，放缩和平移只作用在这一层里面——"在框内放缩"就是
+ * 这一条：框始终钉在原地，照片在框里长大、挪动，多出来的部分被裁掉。
+ *
+ * 尺寸同样是 JS 写死的行内宽高：舞台必须**正好**等于照片那一块，飞行外壳的
+ * 终点才是它，落位才谈得上严丝合缝。
+ */
+.aw-viewer__stage {
+    position: relative;
+    overflow: hidden;
+    /* 圆角跟着白框走（值见 .aw-viewer__frame 那条注释）。照片是被这一层裁的，
+       所以圆角写在舞台身上，图自己不用带 */
+    border-radius: var(--aw-radius);
+    touch-action: none;
+    /* 图片没解码完时露出来的底。取白不取灰：舞台和照片是同一个比例，
+       正常情况下根本看不到它，万一差着零点几像素，白色和白边接得上 */
+    background: #fff;
+    cursor: default;
+}
+
+/* 放大之后才拖得动东西，光标跟着换 */
+.aw-viewer.is-zoomed .aw-viewer__stage {
+    cursor: grab;
+}
+
+.aw-viewer.is-dragging .aw-viewer__stage {
+    cursor: grabbing;
+}
+
+/*
+ * 照片自己。放缩平移写在它的 transform 上，算式见 album.js 的 applyZoom——
+ * 原点取左上角，缩放锚点的换算最省事（translate 之后 scale，两层都是相对
+ * 这个原点算的）。
+ *
+ * 这里只有 opacity 的过渡：**不能**给 transform 加过渡。滚轮和双指要求
+ * 照片跟手，补间会拖出半拍的橡皮筋感。
+ */
+.aw-viewer__img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    transform-origin: 0 0;
+
+    /* 落位那一刻才从飞行外壳手里接过来，交接过程见 settlePhoto() */
+    opacity: 0;
+    transition: opacity var(--aw-cross) linear;
+}
+
+.aw-viewer.is-settled .aw-viewer__img {
+    opacity: 1;
+}
+
+/*
+ * 飞行外壳。
+ *
+ * 盒子的宽高就是舞台那一块，起点靠 scale 缩回缩略图的位置——和文字替身同路：
+ * 按大图渲染再缩小，一路都是清楚的；反过来（按缩略图尺寸放大）会糊，而这张图
+ * 是要停在屏幕上让人看的。
+ *
+ * 里面那层 <img> 是给"从放大状态收回墙上"准备的：外面这层管飞行，里面那层
+ * 带着框里此刻的放缩，两层各自收回去，照片是边缩边从放大状态里退出来的，
+ * 落回墙上的那一帧正好是整张缩略图。
+ */
+.aw-viewer__fly {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 3;
+    overflow: hidden;
+    /* 和白框、舞台同一个圆角，落位那一刻才对得上（值见 .aw-viewer__frame 那条注释）。
+       它会跟着 scale 一起吃缩放：起点缩到缩略图那么大时圆角也缩成零点几像素，
+       和墙上的缩略图看不出差别；落到终点正好是原样，
+       交接给真身那一下既不变方也不跳 */
+    border-radius: var(--aw-radius);
+    transform-origin: 0 0;
+    pointer-events: none;
+    will-change: transform;
+}
+
+.aw-viewer__fly[hidden] {
+    display: none;
+}
+
+.aw-viewer__fly img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    transform-origin: 0 0;
+}
+
+/* 落位时和框里的真身交叉淡化。两边是同一张图、同一个矩形，本来就看不出在换手，
+   淡这一下是为了化掉"外壳是缩放渲染的、多少有点虚"那一点差别 */
+.aw-viewer__fly.is-fading {
+    transition: opacity var(--aw-cross) linear;
+    opacity: 0;
+}
+
+/* 关的时候框要快，不然会和飞回去的照片打架 */
+.aw-viewer.is-closing .aw-viewer__frame {
+    opacity: 0;
+    transition: opacity 160ms linear;
 }
 
 /* ── 无障碍 ──────────────────────────────────────────────── */

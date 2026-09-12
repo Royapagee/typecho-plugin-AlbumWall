@@ -21,8 +21,8 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package AlbumWall
  * @author 罗伊
- * @version 1.1.0
- * @link https://github.com/Royapagee
+ * @version 2.0.0
+ * @link https://github.com/Royapagee/typecho-plugin-AlbumWall
  */
 final class Plugin implements PluginInterface
 {
