@@ -5,9 +5,11 @@ namespace TypechoPlugin\AlbumWall;
 use Typecho\Db;
 use Typecho\Plugin\PluginInterface;
 use Typecho\Widget\Helper\Form;
+use Typecho\Widget\Helper\Form\Element\Checkbox;
 use Typecho\Widget\Helper\Form\Element\Hidden;
 use Typecho\Widget\Helper\Form\Element\Select;
 use Typecho\Widget\Helper\Form\Element\Text;
+use Typecho\Widget\Helper\Layout;
 use Widget\Options;
 
 if (!defined('__TYPECHO_ROOT_DIR__')) {
@@ -19,7 +21,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package AlbumWall
  * @author 罗伊
- * @version 1.0.0
+ * @version 1.1.0
  * @link https://github.com/Royapagee
  */
 final class Plugin implements PluginInterface
@@ -46,11 +48,11 @@ final class Plugin implements PluginInterface
     public static function defaults(): array
     {
         return [
-            'tagSlug'    => 'Photo',
-            'coverField' => 'thumbnail',
-            'pageTitle'  => '相册',
-            'orderBy'    => 'created_desc',
-            'hideEmpty'  => '1',
+            // 多值项，存的是 slug 数组
+            'tagSlugs'  => ['Photo'],
+            'pageTitle' => '相册',
+            'orderBy'   => 'created_desc',
+            'hideEmpty' => '1',
         ];
     }
 
@@ -61,24 +63,106 @@ final class Plugin implements PluginInterface
      */
     public static function settings(): array
     {
-        $saved = [];
+        $defaults = self::defaults();
+        $saved = self::rawSaved();
 
-        try {
-            $saved = Options::alloc()->plugin(self::NAME)->toArray();
-        } catch (\Throwable $e) {
-            // 插件尚未配置时 Options::plugin() 会抛异常，这里静默回落到默认值
-        }
+        $settings = array_merge($defaults, $saved);
 
-        $settings = array_merge(self::defaults(), is_array($saved) ? $saved : []);
+        // tagSlugs 是多值项，得单独解析。下面那条「空值回落默认」的规则会把
+        // 「一个标签都没勾」当成「没配置过」而塞回默认标签，对多值项是错的
+        $settings['tagSlugs'] = self::resolveTagSlugs($saved);
 
         // 表单里被清空的项会以空字符串保存，空值一律回落到默认值
         foreach ($settings as $key => $value) {
+            if ($key === 'tagSlugs') {
+                continue;
+            }
+
             if ($value === null || $value === '') {
-                $settings[$key] = self::defaults()[$key] ?? '';
+                $settings[$key] = $defaults[$key] ?? '';
             }
         }
 
         return $settings;
+    }
+
+    /**
+     * 读插件在 options 表里的原始配置数组，未配置或读库失败时返回空数组。
+     *
+     * @return array<string, mixed>
+     */
+    private static function rawSaved(): array
+    {
+        try {
+            $saved = Options::alloc()->plugin(self::NAME)->toArray();
+        } catch (\Throwable $e) {
+            // 插件尚未配置时 Options::plugin() 会抛异常，这里静默回落到默认值
+            return [];
+        }
+
+        return is_array($saved) ? $saved : [];
+    }
+
+    /**
+     * 把配置里存的标签解析成一串 slug。
+     *
+     * 兼容三种历史形态：
+     *  - tagSlugs 数组          当前形态，勾选框提交上来的
+     *  - tagSlugs 逗号分隔字符串 站上还没有标签时表单退化成文本框，存的是这个
+     *  - tagSlug  单个字符串     1.0.0 的单选时代。升级后原样继承，不必让用户重勾
+     *
+     * 三种都没有（全新安装）时回落到默认标签；只有「显式存了空数组」才算是
+     * 「一个都不想选」，不再回落——否则用户取消勾选后标签会自己长回来。
+     *
+     * @param array<string, mixed> $saved
+     * @return array<int, string>
+     */
+    private static function resolveTagSlugs(array $saved): array
+    {
+        if (array_key_exists('tagSlugs', $saved)) {
+            $value = $saved['tagSlugs'];
+
+            if (is_array($value)) {
+                return self::cleanSlugs($value);
+            }
+
+            if (is_string($value) && trim($value) !== '') {
+                return self::cleanSlugs(explode(',', $value));
+            }
+        }
+
+        $legacy = $saved['tagSlug'] ?? null;
+
+        if (is_string($legacy) && trim($legacy) !== '') {
+            return self::cleanSlugs([$legacy]);
+        }
+
+        return self::cleanSlugs((array) self::defaults()['tagSlugs']);
+    }
+
+    /**
+     * 清洗 slug 列表：丢掉非字符串、空串和重复项，保留原来的顺序。
+     *
+     * @param array<mixed> $slugs
+     * @return array<int, string>
+     */
+    private static function cleanSlugs(array $slugs): array
+    {
+        $clean = [];
+
+        foreach ($slugs as $slug) {
+            if (!is_string($slug)) {
+                continue;
+            }
+
+            $slug = trim($slug);
+
+            if ($slug !== '' && !in_array($slug, $clean, true)) {
+                $clean[] = $slug;
+            }
+        }
+
+        return $clean;
     }
 
     /**
@@ -124,19 +208,6 @@ final class Plugin implements PluginInterface
 
         $form->addInput(
             new Text(
-                'coverField',
-                null,
-                self::defaults()['coverField'],
-                _t('封面自定义字段'),
-                _t(
-                    '在该字段里填图片地址，相册就用这张图做封面；留空、填 1 或填 0 都表示'
-                    . '「从正文提取第一张图」。沿用 Jasmine 主题的 thumbnail 字段即可。'
-                )
-            )
-        );
-
-        $form->addInput(
-            new Text(
                 'pageTitle',
                 null,
                 self::defaults()['pageTitle'],
@@ -168,7 +239,7 @@ final class Plugin implements PluginInterface
                 ],
                 self::defaults()['hideEmpty'],
                 _t('没有图片的文章'),
-                _t('正文和自定义字段里都没有图片时如何处理。')
+                _t('正文里一张图都没有时如何处理。')
             )
         );
 
@@ -185,49 +256,87 @@ final class Plugin implements PluginInterface
     /**
      * 标签选择框。
      *
-     * 优先做成下拉框而不是自由输入：标签 slug 打错一个字母，前台就是一片空白，
+     * 优先做成勾选框而不是自由输入：标签 slug 打错一个字母，前台就是一片空白，
      * 而且没有任何提示——这是这个插件最容易踩的坑，能靠 UI 堵掉就堵掉。
      */
     private static function addTagInput(Form $form): void
     {
         $tags = self::tagOptions();
-        $default = (string) self::defaults()['tagSlug'];
-        $saved = self::savedValue('tagSlug');
+        $default = (array) self::defaults()['tagSlugs'];
+        $saved = self::resolveTagSlugs(self::rawSaved());
 
-        // 站上一个标签都没有（或查库失败）时退回文本框
+        // 站上一个标签都没有（或查库失败）时退回文本框，多个用逗号隔开
         if ($tags === []) {
             $form->addInput(
                 (new Text(
-                    'tagSlug',
+                    'tagSlugs',
                     null,
-                    $saved !== '' ? $saved : $default,
+                    implode(',', $saved),
                     _t('相册标签'),
-                    _t('填写标签的缩略名（slug），例如 Photo。注意是缩略名不是显示名，站上还没有标签时只能手填。')
+                    _t(
+                        '填写标签的缩略名（slug），多个用英文逗号隔开，例如 Photo,JiNan。'
+                        . '注意是缩略名不是显示名，站上还没有标签时只能手填。'
+                    )
                 ))->addRule('required', _t('相册标签不能为空'))
             );
 
             return;
         }
 
-        // 已保存的标签可能已经被删掉了。Select 里没有匹配项时浏览器会默认选中
-        // 第一项，保存一下就悄悄把配置改成了别的标签，所以得把它补回选项里。
-        if ($saved !== '' && !isset($tags[$saved])) {
-            $tags = [$saved => _t('%s（该标签已不存在，请重新选择）', $saved)] + $tags;
+        // 已保存的标签可能已经被删掉了。Checkbox 里找不到对应选项时它根本不会
+        // 渲染出来，用户一保存这项就没了——所以得把它当成一个选项补回去，让用户
+        // 看得见、能自己取消。
+        foreach ($saved as $slug) {
+            if (!isset($tags[$slug])) {
+                $tags[$slug] = _t('%s（该标签已不存在，请重新勾选）', $slug);
+            }
         }
 
-        if (!isset($tags[$default])) {
-            $tags[$default] = $default;
+        // 默认标签同理，得保证它在选项里，否则全新安装时默认值是个看不见的勾
+        foreach ($default as $slug) {
+            if (!isset($tags[$slug])) {
+                $tags[$slug] = $slug;
+            }
         }
 
         $form->addInput(
-            new Select(
-                'tagSlug',
+            (new Checkbox(
+                'tagSlugs',
                 $tags,
-                $saved !== '' ? $saved : $default,
+                $saved,
                 _t('相册标签'),
-                _t('哪些标签下的文章会被聚合成相册。')
-            )
+                _t(
+                    '勾选哪些标签下的文章会被聚合成相册，可多选。'
+                    . '同一篇文章同时命中多个标签时，相册里也只会出现一次。'
+                )
+            ))->multiMode()
         );
+
+        self::addTagStyle($form);
+    }
+
+    /**
+     * 让标签勾选框一行排多个。
+     *
+     * multiMode() 会给每个选项挂上 .multiline，而后台样式表里写死了
+     * `.multiline{display:block}`——一个标签一行，60 个标签能拉出一屏半，勾起来
+     * 得一直往下滚。这里在插件自己的表单上挂个类、补一小段样式把它压回行内，
+     * 别的插件和后台其它页面都不受影响（后台没有针对 form 的样式，挂类不会撞车）。
+     *
+     * white-space:nowrap 是关键：不写的话「生活（Life，24 篇）」会在中文中间断行，
+     * 一行看起来像两个残破的选项。
+     */
+    private static function addTagStyle(Form $form): void
+    {
+        $form->setAttribute('class', 'aw-tag-form');
+
+        $style = new Layout('style', ['type' => 'text/css']);
+        $style->html(
+            '.aw-tag-form .multiline{display:inline-block;vertical-align:top;'
+            . 'min-width:12em;margin:0 1.4em .45em 0;padding:0;white-space:nowrap}'
+        );
+
+        $form->addItem($style);
     }
 
     /**
@@ -271,20 +380,6 @@ final class Plugin implements PluginInterface
     }
 
     /**
-     * 读一项已保存的配置，读不到返回空串。
-     */
-    private static function savedValue(string $key): string
-    {
-        try {
-            $saved = Options::alloc()->plugin(self::NAME)->toArray();
-        } catch (\Throwable $e) {
-            return '';
-        }
-
-        return is_array($saved) ? trim((string) ($saved[$key] ?? '')) : '';
-    }
-
-    /**
      * 为历史版本里残留、当前表单已不再提供的配置项补一个隐藏字段。
      *
      * Typecho 渲染插件设置页时，会把已保存的每个配置项回填到表单上
@@ -293,18 +388,12 @@ final class Plugin implements PluginInterface
      * 找不到对应元素，设置页就会直接 500，且用户无法通过保存来自救。
      *
      * 所以这里把「已保存但表单没有」的键补成隐藏字段，让旧配置可以平滑降级。
+     * 1.0.0 单选的 tagSlug 就是靠这里留下来的：它在表单里没了，但配置还在，
+     * resolveTagSlugs() 仍读得到，用户一保存才被清成 null。
      */
     private static function addLegacyInputs(Form $form): void
     {
-        try {
-            $saved = Options::alloc()->plugin(self::NAME)->toArray();
-        } catch (\Throwable $e) {
-            return;
-        }
-
-        if (!is_array($saved)) {
-            return;
-        }
+        $saved = self::rawSaved();
 
         // 这里用 getInputs() 取全部字段再比对，避免直接调 getInput() 触发未定义键的警告
         $existing = $form->getInputs();
