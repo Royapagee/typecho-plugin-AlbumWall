@@ -1,0 +1,744 @@
+/*
+ * AlbumWall —— 相册墙的前台样式
+ *
+ * 配色分两档（对应 PHP 侧的 Theme::flavor()）：
+ *
+ *  - jasmine：Jasmine 主题把调色板写在 assets/main/main.css 的 CSS 变量里，
+ *    PHP 读不到，所以只能在 CSS 这层接。好处是深色模式跟着主题自动翻转。
+ *  - default：其它主题，只依赖 Bootstrap 的 --bs-* 变量，再回落到自带色值。
+ *
+ * 注意 Jasmine 的 --link-color-rgba 是**四段**（含 alpha）：它本身是"分量"不是
+ * "颜色"，取值处必须自己包一层 rgb()/rgba()。包成 rgba(var(--link-color-rgba))
+ * 正好四段合一，写成 rgba(var(--link-color-rgba), .5) 则会拼出五个分量而整条被丢。
+ * 所以凡是需要"再叠一层透明度"的地方一律走 color-mix()，它拿的是颜色而不是分量，
+ * 不受分量个数影响。
+ *
+ * 这一条踩过：--aw-text 曾经直接写成 var(--link-color-rgba)，于是它在 Jasmine 档
+ * 下是 "44, 36, 35, 1" 而不是颜色，所有 color: var(--aw-text) 被判非法回落到继承值
+ * （卡片标题因此是 Bootstrap 的冷灰 #212529 而不是主题的暖黑），
+ * color-mix() 也跟着废掉 —— 而 --aw-line 正是从它算的，
+ * 于是 border: 1px solid var(--aw-line) 整条失效、border-style 退成 none、
+ * 边框宽度算成 0：网格里那些卡片压根就没长出过描边。
+ */
+
+/* ── 兜底色值 ────────────────────────────────────────────── */
+:root {
+    --aw-surface: #fffbfb;
+    --aw-text: #2c2423;
+    --aw-muted: rgba(44, 36, 35, .62);
+    --aw-line: rgba(44, 36, 35, .12);
+    --aw-accent: #a85b6e;
+    --aw-scrim: rgba(20, 14, 16, .62);
+    --aw-shadow: 0 18px 48px rgba(20, 14, 16, .28);
+    /* 偏方的观感：卡片、面板一律小圆角，照片几乎直角 */
+    --aw-radius: 6px;
+    --aw-radius-lg: 8px;
+    --aw-radius-sm: 3px;
+
+    /* 卡片边界。网格里一块一块的相册得让人一眼分得开，所以描边是必需项；
+       再给封面留一圈内衬，照片像镶在相册页上，点击时"从版面上揭下来"也更好读。 */
+    --aw-card-line: rgba(44, 36, 35, .22);
+    --aw-card-pad: 4px;
+    --aw-card-lift: 0 1px 2px rgba(20, 14, 16, .05);
+    --aw-card-lift-hover: 0 12px 28px rgba(20, 14, 16, .16);
+
+    /*
+     * 标题排版。卡片标题、飞行替身、详情标题三处**共用**这一套，只有字号不同。
+     *
+     * 这是"一镜到底"的前提：替身是拿卡片标题等比放大到详情标题那么大的，
+     * 行高比只要差一点，两端的行盒高度就不再是同一个倍数，文字基线在落位那一刻
+     * 会跳一两像素（1.35 对 1.25 时约 1.4px）。字重同理，500 放大成 500 再淡入
+     * 成 600 的标题会看出"变粗了一下"。
+     *
+     * JS 拿两个字号之比算放大倍数，所以改字号要两边一起改，别只改一个。
+     */
+    --aw-title-size: .95rem;
+    --aw-detail-title-size: 1.75rem;
+    --aw-title-lh: 1.3;
+    --aw-title-weight: 500;
+
+    /* 副标题（日期 · 张数）同理。三处共用，间距一律用 em——em 跟着各自的字号走，
+       替身放大后间距自动落到和详情一样的绝对值上。 */
+    --aw-sub-size: .76rem;
+    --aw-detail-sub-size: .85rem;
+    --aw-sub-lh: 1.5;
+    --aw-sub-gap: .45em;
+
+    /* 动效时长。JS 会读它来驱动 FLIP，改这里就够了。 */
+    --aw-dur: 620ms;
+    /* 落位时的交叉淡化时长。替身淡出、真身淡入同时走完这一段 */
+    --aw-cross: 220ms;
+    --aw-ease: cubic-bezier(.22, .9, .28, 1);
+
+    /*
+     * 详情面板的几何。写成变量是因为关闭按钮在滚动区外面，要靠这套算式
+     * 才能和面板右边缘对齐；散在三处写死的话，改一个数就会错位。
+     */
+    --aw-panel-w: 940px;
+    --aw-pad: clamp(1rem, 4vw, 3rem);
+    --aw-panel-pad: clamp(1.1rem, 3vw, 2.2rem);
+
+    /* 滚动条槽的宽度，由 JS 实测后写进来（见 album.js 的 syncGutter）。
+       它会把详情面板整体左移半个槽宽，不算上的话关闭按钮会和面板差几像素。
+       JS 没跑时退化成 0，只是略微不齐，不影响使用。 */
+    --aw-gutter: 0px;
+}
+
+/* 认不出 color-mix() 的浏览器保留上一行，认识的用当前文字色算，深色下自动翻。
+   必须连 [data-aw-theme] 一起声明：自定义属性是在**声明它的那个元素**上求值的，
+   只写在 :root 上的话，它算的是 :root 的 --aw-text，而不是 .aw-app 那份。 */
+:root,
+[data-aw-theme] {
+    --aw-line: color-mix(in srgb, var(--aw-text) 16%, transparent);
+    --aw-card-line: color-mix(in srgb, var(--aw-text) 22%, transparent);
+}
+
+/* ── Jasmine 档 ──────────────────────────────────────────── */
+[data-aw-theme="jasmine"] {
+    --aw-surface: var(--bs-body-bg, #fffbfb);
+    /* 主题的这几个变量是"分量"不是颜色，必须自己包一层（见文件头的说明）。
+       包成 rgba() 而不是 rgb()：Jasmine 给的是四段，第四段是 alpha。 */
+    --aw-text: rgba(var(--link-color-rgba, 44, 36, 35, 1));
+    --aw-muted: rgba(var(--link-color-second-rgba, 44, 36, 35, .65));
+    --aw-accent: rgb(var(--primary-color-rgba, 168, 91, 110));
+    --aw-scrim: rgba(var(--bg-auto-rgb, 253, 237, 235), .86);
+    --aw-shadow: 0 18px 48px rgba(var(--bg-auto-rgb, 26, 18, 20), .38);
+    --aw-radius: .375rem;
+    --aw-radius-lg: .5rem;
+    --aw-radius-sm: .1875rem;
+}
+
+/*
+ * Jasmine 的文章列表卡片是 .card border-0，本来没有描边。相册卡片描边照留：
+ * 列表是一行一行往下读的，卡片连着页面也分得清；网格是二维铺开的，N 块同色卡片
+ * 挨在一起、页宽又比卡片亮一点点，不留边就糊成一片，看不出哪里是一块相册的尽头。
+ * 描边取 --aw-card-line（文字色的 22%），深色模式下自动跟着翻。
+ */
+
+/* ── 主题工具类缺失时的兜底 ──────────────────────────────── */
+.aw-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.aw-stack-tight {
+    display: flex;
+    flex-direction: column;
+    gap: .25rem;
+}
+
+.aw-container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+}
+
+/* ── 页面头部 ────────────────────────────────────────────── */
+.aw-subtitle {
+    margin: 0;
+    font-size: .85rem;
+    color: var(--aw-muted);
+}
+
+.aw-empty {
+    margin: 0;
+    padding: 2rem 0;
+    color: var(--aw-muted);
+}
+
+/* ── 网格 ────────────────────────────────────────────────── */
+.aw-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 170px), 1fr));
+    gap: 1rem;
+    margin-top: .5rem;
+
+    /*
+     * 打开相册时整片网格会退到后面，过渡写在网格上，卡片只管各自的位移。
+     *
+     * 这里只有模糊和压暗，**没有缩放**：缩放会挪动卡片的位置，而替身的落点是照着
+     * 卡片量的，卡片一动落点就跟着错。相比模糊和压暗（纯视觉），缩放换来的那点
+     * "后退感"抵不上它带来的麻烦——网格整体缩 1.5% 基本看不出来，卡片那 6% 却要
+     * 让替身的落点补偿一层"被缩了多少"，收起时还得把这一段留到落位之后再走。
+     */
+    transition:
+        filter var(--aw-dur) var(--aw-ease),
+        opacity var(--aw-dur) var(--aw-ease);
+}
+
+.aw-grid.is-behind {
+    filter: blur(3px) brightness(.72);
+    opacity: .4;
+    pointer-events: none;
+}
+
+/* 被点开的那张卡片原地留白，网格不能塌——塌了就看不到"从网格里裂开"了 */
+.aw-card.is-flying {
+    visibility: hidden;
+}
+
+/* ── 卡片 ────────────────────────────────────────────────── */
+.aw-card {
+    /* button 的默认外观全部清掉 */
+    appearance: none;
+    -webkit-appearance: none;
+    margin: 0;
+    padding: 0;
+    font: inherit;
+    color: var(--aw-text);
+    text-align: left;
+    cursor: pointer;
+
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+
+    /* 内衬的宽度由封面自己消化（封面是块级、宽度 auto），
+       所以这一圈不会被 meta 的 padding 叠加成两倍 */
+    padding: var(--aw-card-pad);
+
+    background: var(--aw-surface);
+    border: 1px solid var(--aw-card-line);
+    border-radius: var(--aw-radius);
+    box-shadow: var(--aw-card-lift);
+
+    transition:
+        transform 260ms var(--aw-ease),
+        box-shadow 260ms var(--aw-ease),
+        border-color 260ms var(--aw-ease),
+        opacity var(--aw-dur) var(--aw-ease);
+}
+
+.aw-card:hover,
+.aw-card:focus-visible {
+    /* 悬停时描边染上主色：整块相册是被"选中"的那一个。
+       认不出 color-mix() 的浏览器留着上一行的素色描边 */
+    border-color: var(--aw-card-line);
+    border-color: color-mix(in srgb, var(--aw-accent) 60%, var(--aw-card-line));
+    box-shadow: var(--aw-card-lift-hover);
+    transform: translateY(-2px);
+}
+
+.aw-card:focus-visible {
+    outline: 2px solid var(--aw-accent);
+    outline-offset: 2px;
+}
+
+/* 邻居按各自相对点击点的方向被推开一点——"被撑开"的那股力气感全在这上面了 */
+.aw-grid.is-behind .aw-card {
+    transform: translate(var(--aw-push-x, 0), var(--aw-push-y, 0));
+    opacity: .4;
+}
+
+.aw-card__cover {
+    display: block;
+    position: relative;
+    aspect-ratio: 3 / 2;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--aw-text) 8%, transparent);
+}
+
+.aw-card__cover img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 520ms var(--aw-ease);
+}
+
+.aw-card:hover .aw-card__cover img,
+.aw-card:focus-visible .aw-card__cover img {
+    transform: scale(1.06);
+}
+
+/* 既没有封面也没有正文图的占位卡片 */
+.aw-card__blank {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: repeating-linear-gradient(
+        45deg,
+        transparent 0 8px,
+        color-mix(in srgb, var(--aw-text) 8%, transparent) 8px 16px
+    );
+}
+
+/* 标题日期在上、封面在下——和详情面板同序，展开时封面不必越过标题 */
+.aw-card__meta {
+    display: flex;
+    flex-direction: column;
+    gap: .1rem;
+    padding: .55rem .35rem .5rem;
+}
+
+/*
+ * 下面这一组（标题、副标题、其中的日期和「·」和「N 张」）在**三个地方**共用：
+ * 网格卡片、飞行替身（.aw-shell__*）、以及详情面板里对应的那几行。
+ *
+ * 替身直接把卡片这一组的选择器一起挂上（class="aw-card__title aw-shell__title"），
+ * 于是"两端排版必须一样"这件事是结构保证的，而不是靠约定——以后谁调了这里的
+ * 字号或字距，三处一起动，不会悄悄把落位对歪。
+ *
+ * 详情那两行没能共用（字号不同、还多一个链接），所以它那边只借变量。
+ */
+.aw-card__title {
+    display: block;
+    font-size: var(--aw-title-size);
+    font-weight: var(--aw-title-weight);
+    line-height: var(--aw-title-lh);
+    color: var(--aw-text);
+
+    /* 网格里只给一行，长标题不能在卡片里撑成两行。
+       替身带着同样的规则，点击那一刻才看不出文字被换过手 */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.aw-card__sub {
+    display: flex;
+    align-items: center;
+    gap: var(--aw-sub-gap);
+
+    font-size: var(--aw-sub-size);
+    line-height: var(--aw-sub-lh);
+    color: var(--aw-muted);
+
+    /* 日期和张数在窄卡片里不许换行：一换行卡片就比邻居高，
+       而且替身是单行的，折行会让落位无从谈起 */
+    white-space: nowrap;
+}
+
+/* 「·」分隔，和主题列表页里"分类 · 日期"的写法一致。
+   它自己不带字号——跟着父元素走，替身放大后三段的字距才是同一个倍数 */
+.aw-card__sep,
+.aw-detail__sep {
+    opacity: .55;
+}
+
+/* 封面上的那层"封条"。点击时淡出，观感上就是相册被拆封。
+   它和角标都收在 .aw-card__cover 里，所以 inset: 0 是相对封面而不是整张卡片——
+   外壳要飞的正是封面那一块，两边才能像素级对上 */
+.aw-card__veil,
+.aw-shell__veil {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(
+        to bottom,
+        rgba(0, 0, 0, .18) 0%,
+        rgba(0, 0, 0, .02) 42%,
+        transparent 60%
+    );
+    transition: opacity 200ms linear;
+}
+
+.aw-card:hover .aw-card__veil {
+    opacity: .6;
+}
+
+/* ── 浮层：压暗层 ────────────────────────────────────────── */
+.aw-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 9990;
+    background: var(--aw-scrim);
+    opacity: 0;
+    transition: opacity 240ms var(--aw-ease);
+}
+
+.aw-scrim.is-on {
+    opacity: 1;
+}
+
+/* ── 浮层：飞行的封面 ────────────────────────────────────── */
+.aw-shell {
+    position: fixed;
+    z-index: 9992;
+    overflow: hidden;
+    border-radius: var(--aw-radius);
+
+    /* 用 background 而不是 <img>：外壳的宽高在被 JS 逐帧改写，
+       background-size: cover 会跟着重新裁切，图片始终不变形 */
+    background-position: center;
+    background-size: cover;
+    background-repeat: no-repeat;
+    background-color: color-mix(in srgb, var(--aw-text) 8%, transparent);
+
+    /* 位移期间不要让它挡住底下的交互 */
+    pointer-events: none;
+    will-change: top, left, width, height;
+}
+
+/*
+ * 落位时和详情封面交叉淡化，而不是"啪"地藏起来。两边是同一张图、同一个矩形，
+ * 淡入淡出同时走，画面上本来就是同一张照片叠着自己，看不出在换手；
+ * 万一详情那张 <img> 还没解码完，这段淡化也把"空一下"变成了平滑的过渡。
+ */
+.aw-shell.is-fading {
+    transition: opacity var(--aw-cross) linear;
+    opacity: 0;
+}
+
+.aw-shell__veil {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        to bottom,
+        rgba(0, 0, 0, .18) 0%,
+        rgba(0, 0, 0, .02) 42%,
+        transparent 60%
+    );
+    transition: opacity 200ms linear;
+}
+
+/*
+ * 文字的飞行替身。位置由 JS 用 transform 驱动，这里只管"它是个浮在页面上的
+ * 复制品"这一件事——长相（字号、字重、行高、颜色、省略号）由模板上那串
+ * .aw-card__* 类提供，和卡片里那份是同一套规则。
+ *
+ * transform-origin 必须是左上角：落点算的就是"替身左上角对齐真身左上角"。
+ */
+.aw-shell__title,
+.aw-shell__sub {
+    position: fixed;
+    z-index: 9993;
+    pointer-events: none;
+    transform-origin: top left;
+    will-change: transform;
+}
+
+/* 副标题那条在标题之上飞。两条都朝下长大，重叠的那一点在落位前就分开了，
+   真叠上时 z-index 只是个保险 */
+.aw-shell__sub {
+    z-index: 9994;
+}
+
+/*
+ * 落位那一刻：替身淡出、真身淡入，两边时长一样、位置像素重合，
+ * 这一换本身是看不见的——看得见的是替身身上那点缩放糊，
+ * 它会在这段淡出里化掉，而不是"啪"地一下变清晰。
+ *
+ * 只在 .is-fading 时接管 transition：飞行期间 JS 往 style 上写了
+ * transform / width 的过渡，那是行内样式，这里不抢。
+ */
+.aw-shell__title.is-fading,
+.aw-shell__sub.is-fading {
+    transition: opacity var(--aw-cross) linear;
+    opacity: 0;
+}
+
+/* ── 浮层：详情 ──────────────────────────────────────────── */
+.aw-detail {
+    position: fixed;
+    inset: 0;
+    z-index: 9991;
+    overflow: hidden;
+}
+
+.aw-detail__scroll {
+    position: absolute;
+    inset: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding: var(--aw-pad);
+
+    /*
+     * 滚动条的位置要一直占着。照片是懒加载的，量终点时图还没下来、内容不够高，
+     * 容器没有滚动条；等图加载完滚动条一出现，居中面板会整体左移半个滚动条宽，
+     * 封面落点就和真身差几个像素。预留之后两边布局一致。
+     *
+     * Safari 不支持这条属性，但它默认用覆盖式滚动条（不占宽），本来就没这个问题。
+     */
+    scrollbar-gutter: stable;
+}
+
+.aw-detail__inner {
+    position: relative;
+    max-width: var(--aw-panel-w);
+    margin: 0 auto;
+
+    padding: var(--aw-panel-pad);
+    border-radius: var(--aw-radius-lg);
+    background: var(--aw-surface);
+    box-shadow: var(--aw-shadow);
+
+    /* 面板本身淡入，标题和封面在飞行结束前是替身在上头，所以留空 */
+    opacity: 0;
+    transform: translateY(10px);
+    transition:
+        opacity 320ms var(--aw-ease) 160ms,
+        transform 320ms var(--aw-ease) 160ms;
+}
+
+.aw-detail.is-open .aw-detail__inner {
+    opacity: 1;
+    transform: none;
+}
+
+.aw-detail__head {
+    margin-bottom: .9rem;
+    /* 给右上角的关闭按钮让位，标题不会顶到它底下 */
+    padding-right: 2.6rem;
+}
+
+/*
+ * 标题的排版必须和卡片标题**只差字号**：同一个 --aw-title-lh、同一个
+ * --aw-title-weight。多行时行盒也要按同一个倍数长大，否则替身落位时
+ * 文字基线会跳。改这里请连着上面那组变量一起想。
+ */
+.aw-detail__title {
+    margin: 0 0 .35rem;
+    font-size: var(--aw-detail-title-size);
+    font-weight: var(--aw-title-weight);
+    line-height: var(--aw-title-lh);
+    color: var(--aw-text);
+
+    /* 飞行期间由替身顶着，落位后再交回给真身 */
+    opacity: 0;
+    transition: opacity var(--aw-cross) linear;
+}
+
+.aw-detail.is-settled .aw-detail__title {
+    opacity: 1;
+}
+
+/*
+ * 这一行是"日期 · 张数 · 阅读原文"。前两段和卡片上那条副标题是同一份内容，
+ * 由 JS 从卡片 DOM 里照抄过来；间距用 em 而不是 rem，替身放大之后
+ * 三段的落点才能和这一行逐字对上（见 :root 里的 --aw-sub-gap）。
+ */
+.aw-detail__meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--aw-sub-gap);
+    margin: 0;
+    font-size: var(--aw-detail-sub-size);
+    line-height: var(--aw-sub-lh);
+    color: var(--aw-muted);
+
+    /* 和标题一起，在落位那一刻从替身手里接过来 */
+    opacity: 0;
+    transition: opacity var(--aw-cross) linear;
+}
+
+.aw-detail.is-settled .aw-detail__meta {
+    opacity: 1;
+}
+
+.aw-detail__link {
+    color: var(--aw-accent);
+    text-decoration: none;
+}
+
+.aw-detail__link:hover {
+    text-decoration: underline;
+}
+
+.aw-detail__link[hidden] {
+    display: none;
+}
+
+.aw-detail__cover {
+    position: relative;
+    margin: 0 0 1rem;
+    border-radius: var(--aw-radius);
+    overflow: hidden;
+    background: color-mix(in srgb, var(--aw-text) 8%, transparent);
+    opacity: 0;
+    transition: opacity var(--aw-cross) linear;
+
+    /*
+     * 比例必须写死。FLIP 要在图片下载完之前就量出这块的终点位置，靠 auto 高度
+     * 的话量到的是 0，封面会飞到一个不存在的地方。写死比例还有个副作用是好的：
+     * 它和网格卡片的封面比例一致，交接那一刻两边裁切完全相同，看不出接缝。
+     */
+    aspect-ratio: 3 / 2;
+    max-height: 55vh;
+}
+
+.aw-detail.is-settled .aw-detail__cover {
+    opacity: 1;
+}
+
+.aw-detail__cover[hidden] {
+    display: none;
+}
+
+.aw-detail__cover img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+/* ── 详情里的照片墙 ──────────────────────────────────────── */
+.aw-photos {
+    columns: 4 170px;
+    column-gap: .6rem;
+}
+
+.aw-photo {
+    margin: 0 0 .6rem;
+    break-inside: avoid;
+    border-radius: var(--aw-radius-sm);
+    overflow: hidden;
+    background: color-mix(in srgb, var(--aw-text) 8%, transparent);
+
+    /* --aw-i 由 JS 按序号写进来，越靠后的照片入场越晚。
+       序号在 12 之后就不再递增，否则第 41 张要等一秒才出现。 */
+    opacity: 0;
+    transform: translateY(14px);
+    transition:
+        opacity 420ms var(--aw-ease) calc(var(--aw-i, 0) * 26ms),
+        transform 420ms var(--aw-ease) calc(var(--aw-i, 0) * 26ms);
+}
+
+.aw-detail.is-settled .aw-photo {
+    opacity: 1;
+    transform: none;
+}
+
+.aw-photo img {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+
+.aw-detail__empty {
+    margin: .5rem 0 0;
+    font-size: .85rem;
+    color: var(--aw-muted);
+}
+
+.aw-detail__empty[hidden] {
+    display: none;
+}
+
+/* ── 关闭按钮 ────────────────────────────────────────────── */
+/*
+ * 位置贴着面板右上角，但元素本身在滚动区外面，所以相册滚到多远它都在。
+ *
+ * 面板在滚动区内是 margin:0 auto 居中的，所以"视口右边缘到面板右边缘的距离"
+ * 是 max(--aw-pad + 槽宽, 50% - (面板宽 - 槽宽)/2)：面板够窄时被内边距顶住，
+ * 够宽时两侧平分余量。再加上面板自己的内边距，就落在面板内容区的右上角——
+ * 和标题同一行，所以 .aw-detail__head 要留出右侧空间。
+ */
+.aw-detail__close {
+    -webkit-appearance: none;
+    appearance: none;
+    position: absolute;
+    z-index: 2;
+
+    top: calc(var(--aw-pad) + var(--aw-panel-pad));
+    right: calc(
+        max(
+            var(--aw-pad) + var(--aw-gutter),
+            50% - (var(--aw-panel-w) - var(--aw-gutter)) / 2
+        ) + var(--aw-panel-pad)
+    );
+
+    width: 2.1rem;
+    height: 2.1rem;
+    padding: 0;
+    border: 1px solid var(--aw-line);
+    border-radius: var(--aw-radius);
+    font-size: 1.25rem;
+    line-height: 1;
+    cursor: pointer;
+    /* 面板本身就是浅色卡面，再给它套白底加阴影反而脏；描边加满色文字就够
+       撑出可点性了，悬停再补一层浅底 */
+    color: var(--aw-text);
+    background: transparent;
+
+    opacity: 0;
+    transition:
+        opacity 240ms var(--aw-ease) 320ms,
+        color 180ms var(--aw-ease),
+        background-color 180ms var(--aw-ease);
+}
+
+.aw-detail.is-open .aw-detail__close {
+    opacity: 1;
+}
+
+.aw-detail__close:hover {
+    color: var(--aw-text);
+    background: color-mix(in srgb, var(--aw-text) 8%, transparent);
+}
+
+.aw-detail__close:focus-visible {
+    outline: 2px solid var(--aw-accent);
+    outline-offset: 2px;
+}
+
+/* ── 关闭时的反向过渡 ────────────────────────────────────── */
+/* 面板淡出要快，不然会和飞回去的封面打架 */
+.aw-detail.is-closing .aw-detail__inner {
+    opacity: 0;
+    transform: translateY(8px);
+    transition:
+        opacity 200ms var(--aw-ease),
+        transform 200ms var(--aw-ease);
+}
+
+.aw-detail.is-closing .aw-detail__title,
+.aw-detail.is-closing .aw-detail__meta,
+.aw-detail.is-closing .aw-detail__cover {
+    opacity: 0;
+    transition: opacity 100ms linear;
+}
+
+.aw-detail.is-closing .aw-detail__close {
+    opacity: 0;
+    transition: opacity 140ms linear;
+}
+
+.aw-detail.is-closing .aw-photo {
+    opacity: 0;
+    transform: translateY(8px);
+    transition:
+        opacity 180ms linear,
+        transform 180ms var(--aw-ease);
+}
+
+/* ── 无障碍 ──────────────────────────────────────────────── */
+/*
+ * 把时长压到 1ms 而不是 0：JS 靠读 --aw-dur 驱动动画，0 会让"动画结束"的
+ * 判定和 transitionend 都变得不可靠，留一帧的时间最稳。
+ */
+@media (prefers-reduced-motion: reduce) {
+    :root {
+        --aw-dur: 1ms;
+        /* 交叉淡化也得压掉：留 220ms 的话，"瞬间完成"的落位之后
+           替身还会在原地多停一瞬才淡完 */
+        --aw-cross: 1ms;
+    }
+
+    .aw-card,
+    .aw-card:hover,
+    .aw-card:focus-visible {
+        transform: none;
+    }
+
+    .aw-grid.is-behind,
+    .aw-grid.is-behind .aw-card {
+        filter: none;
+        transform: none;
+    }
+
+    .aw-card:hover .aw-card__cover img {
+        transform: none;
+    }
+
+    .aw-photo,
+    .aw-detail.is-settled .aw-photo,
+    .aw-detail.is-closing .aw-photo {
+        transform: none;
+        transition-delay: 0ms;
+    }
+}
