@@ -5,6 +5,10 @@
 
 eg：整理所有包含tag为摄影的博客/日记/游记等等乱七八糟的文章，汇总为照片墙。
 
+| 演示地址：[点击访问](https://blog.roysgensokyo.space/album.html) |
+| --- |
+| <img width="100%" height="100%" alt="Plugin-View" src="https://github.com/user-attachments/assets/a083f5bb-809f-4c23-a9eb-3a04b39cf24f" /> |
+
 ## 特性
 
 - **多标签聚合**：标签可多选，命中任意一个标签的文章都会进相册；一篇文章同时挂着多个标签时只出现一次
